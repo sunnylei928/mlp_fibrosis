@@ -103,12 +103,14 @@ def main():
 
     # Loss functions to compare
     loss_configs = {
-        "ce":            ("ce", None),
-        "cdw_ce":        ("cdw_ce", None),
-        "cdw_ce_margin": ("cdw_ce_margin", None),
-        "mse":           ("mse", None),
-        "mlp_coral":     ("mlp_coral", None),  # MLP + CORAL loss
-        "coral":         ("coral", None),       # CORALNet + CORAL loss (原始)
+        "ce":              ("ce", None),
+        "cdw_ce":          ("cdw_ce", None),
+        "cdw_ce_margin":   ("cdw_ce_margin", None),
+        "cdw_ce_prob":     ("cdw_ce_prob", None),
+        "cdw_ce_cc":       ("cdw_ce_cc", None),  # Clinical Cost-Aware Distance (NEW)
+        "mse":             ("mse", None),
+        "mlp_coral":       ("mlp_coral", None),  # MLP + CORAL loss
+        "coral":           ("coral", None),       # CORALNet + CORAL loss (原始)
     }
 
     # 保存完整配置
@@ -142,6 +144,11 @@ def main():
         elif loss_type == 'cdw_ce_margin':
             loss_kwargs["alpha"] = 1.0
             loss_kwargs["margin"] = 0.05
+        elif loss_type == 'cdw_ce_prob':
+            loss_kwargs["alpha"] = 1.0
+            loss_kwargs["margin"] = 0.0
+        elif loss_type == 'cdw_ce_cc':
+            loss_kwargs["alpha"] = 0.75  # 临床成本矩阵距离惩罚（v4: 提高alpha增强惩罚强度）
 
         criterion = get_loss(loss_type, class_weights=weight, **loss_kwargs)
         optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)

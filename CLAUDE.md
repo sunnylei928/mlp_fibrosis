@@ -51,11 +51,24 @@ Factory pattern via `get_loss(name, **kwargs)`:
 - `ce`: Standard cross-entropy
 - `cdw_ce`: Class Distance Weighted CE (Polat et al., 2025)
 - `cdw_ce_margin`: CDW-CE with margin
+- `cdw_ce_prob`: CDW-CE with prediction confidence weighting - multiplies entire loss by max predicted probability $p_{\hat{y}}$
 - `coral`: CORAL ordinal loss (Saito et al., 2021) - used with CORALNet
 - `mlp_coral`: Same CORAL loss - used with MLP (for ablation study)
 - `mse`: MSE on softmax probabilities
 - `focal`: Focal loss (gamma=2.0)
 - `label_smoothing`: Label smoothing CE (smoothing=0.1)
+
+**Loss Function Formulas**:
+
+| Loss | Formula |
+|------|---------|
+| CE | $-\log(p_c)$ where $p_c$ is true class probability |
+| CDW-CE | $-\sum_{i} \log(1-p_i) \cdot \|i-c\|^\alpha$ |
+| CDW-CE-Margin | Same, with $p_i' = \min(p_i + m, 1-\epsilon)$ |
+| CDW-CE-Prob | $p_{\hat{y}} \cdot \left(-\sum_{i} \log(1-p_i) \cdot \|i-c\|^\alpha\right)$ |
+| CORAL | BCE over $K-1$ binary tasks (cumulative probabilities) |
+
+where $p_i = \text{softmax}(\text{logits})_i$, $c$ is true class, $\hat{y} = \arg\max_i p_i$ is predicted class.
 
 **Adding a new loss function**:
 1. Implement class in `core/loss.py` with `forward(logits, targets)` method
@@ -67,9 +80,10 @@ Factory pattern via `get_loss(name, **kwargs)`:
 **Critical preprocessing order** (`core/dataset.py`):
 1. **HA cleaning**: Regex fix for malformed Excel entries like `"19..56"` → proper numbers
 2. Target encoding: LabelEncoder maps F0-F4 → 0-4
-3. Categorical one-hot: `性别`, `Machine` → binary features
+3. Categorical one-hot: `性别` (男/女), `Machine` (MIindary/PHILIPS) → 4 binary features (`drop_first=False`)
 4. Standardization: StandardScaler fit on train only (avoid data leakage)
 5. Stratified split: 70% train / 10% val / 20% test
+6. **Final input shape**: `[B, 24]` where B = batch size
 
 **Class weights**: Calculated as `1 / class_counts`, normalized to sum to num_classes
 
@@ -104,6 +118,9 @@ Standard metrics: accuracy, macro_f1, weighted_f1
 ## Configuration
 
 **Config class** (`config/__init__.py`):
+- `NUMERIC_COLS = 20` (年龄, 身高, 体重, BMI, PLT, ALT, AST, GGT, ALB, ALP, HA, PIIIP, CIV, LN, AST/PLT, AST/ALT, P-SWE, 2D-SWE, ARPI（AST/40）, FIB-4)
+- `CATEGORICAL_COLS = ["性别", "Machine"]` → one-hot encoded with `drop_first=False`
+- **Final input dimension: 24** (20 numeric + 4 binary from categorical)
 - `HIDDEN_DIMS = [64, 32, 16]`
 - `DROPOUT = 0.3`
 - `LEARNING_RATE = 1e-3`
@@ -156,7 +173,8 @@ if loss_type == 'new_loss':
 
 **Source**: `data/深三数据useful_填充.xlsx`
 - 391 samples, 25 columns
-- 19 numeric features (PLT, ALT, AST, HA, etc.)
-- 2 categorical (性别, Machine)
+- 20 numeric features (年龄, 身高, 体重, BMI, PLT, ALT, AST, GGT, ALB, ALP, HA, PIIIP, CIV, LN, AST/PLT, AST/ALT, P-SWE, 2D-SWE, ARPI（AST/40）, FIB-4)
+- 2 categorical (性别, Machine) → one-hot encoded to 4 binary features
+- **Final input dimension: 24 features** (20 numeric + 4 binary)
 - Target: LABLE_F (F0-F4)
 - Class distribution: F0:57, F1:89, F2:59, F3:33, F4:32 (imbalanced)

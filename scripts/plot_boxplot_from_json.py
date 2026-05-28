@@ -71,7 +71,7 @@ def plot_boxplot(all_results, save_path):
         ax.set_ylim(0, 1.05 if metric != 'mae' else None)
 
         # 设置x轴刻度标签旋转（与comparison图一致）
-        ax.set_xticklabels(labels_for_metric, rotation=15, ha='right')
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=9)
 
         # 添加样本量标注
         for i, data in enumerate(data_for_metric):
@@ -91,7 +91,7 @@ def plot_boxplot(all_results, save_path):
 def main():
     parser = argparse.ArgumentParser(description='从JSON文件绘制箱线图')
     parser.add_argument('--json', type=str,
-                        default='/home/ubuntu/lq/MLP_results/5fold_3/repeated_kfold_details.json',
+                        default='/home/ubuntu/lq/MLP_results/5fold_3/json/repeated_kfold_details.json',
                         help='JSON文件路径')
     parser.add_argument('--output', type=str,
                         default='repeated_kfold_boxplot.png',

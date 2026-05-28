@@ -20,7 +20,7 @@ from core.model import MLPClassifier, CORALNet
 from core.loss import get_loss
 from training.train import train_model
 from core.evaluate import evaluate_epoch
-from training.utils import create_versioned_dir
+from training.utils import create_versioned_dir, plot_confusion_matrices
 
 
 class Logger:
@@ -75,6 +75,9 @@ def run_kfold_cross_validation(config, loss_configs, k=5):
         loss_configs: loss 配置字典
         k: 折数
     """
+    # 添加混淆矩阵导入
+    from sklearn.metrics import confusion_matrix
+
     # 加载完整数据
     X, y, le = load_data_full(config)
     print(f"总样本数: {len(X)}")
@@ -154,6 +157,8 @@ def run_kfold_cross_validation(config, loss_configs, k=5):
             elif loss_type == 'cdw_ce_margin':
                 loss_kwargs["alpha"] = 1.0
                 loss_kwargs["margin"] = 0.05
+            elif loss_type == 'cdw_ce_cc':
+                loss_kwargs["alpha"] = 0.75  # 临床成本矩阵距离惩罚（v4: 提高alpha增强惩罚强度）
 
             criterion = get_loss(loss_type, class_weights=weight, **loss_kwargs)
             optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
@@ -167,10 +172,14 @@ def run_kfold_cross_validation(config, loss_configs, k=5):
             # 测试
             test_metrics = evaluate_epoch(model, test_loader, criterion, config.DEVICE)
 
+            # 计算混淆矩阵
+            cm = confusion_matrix(test_metrics['labels'], test_metrics['preds'])
+            test_metrics['confusion_matrix'] = cm
+
             print(f"Fold {fold_idx + 1} - Acc: {test_metrics['accuracy']:.4f}, "
                   f"QWK: {test_metrics['qwk']:.4f}, MAE: {test_metrics['mae']:.4f}")
 
-            # 保存结果
+            # 保存结果（包含混淆矩阵）
             all_results[loss_name].append(test_metrics)
 
     return all_results, le
@@ -237,6 +246,7 @@ def main():
         "ce":            ("ce", None),
         "cdw_ce":        ("cdw_ce", None),
         "cdw_ce_margin": ("cdw_ce_margin", None),
+        "cdw_ce_cc":      ("cdw_ce_cc", None),  # Clinical Cost-Aware Distance (NEW)
         "mse":           ("mse", None),
         "mlp_coral":     ("mlp_coral", None),  # MLP + CORAL loss
         "coral":         ("coral", None),       # CORALNet + CORAL loss (原始)
@@ -253,21 +263,81 @@ def main():
     with open(os.path.join(version_dir, 'kfold_summary.json'), 'w', encoding='utf-8') as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    # 保存详细结果
+    # 保存详细结果（包含混淆矩阵）
     detailed_results = {}
     for loss_name, fold_results in all_results.items():
         detailed_results[loss_name] = []
         for i, fold in enumerate(fold_results):
-            fold_dict = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v
-                         for k, v in fold.items() if k not in ['preds', 'labels']}
+            fold_dict = {}
+            for k, v in fold.items():
+                if k in ['preds', 'labels']:
+                    # 转换为列表
+                    fold_dict[k] = v.tolist() if hasattr(v, 'tolist') else list(v)
+                elif k == 'confusion_matrix':
+                    # 混淆矩阵已经存在，直接保留
+                    fold_dict[k] = v.tolist() if hasattr(v, 'tolist') else v
+                elif isinstance(v, (np.floating, np.integer)):
+                    fold_dict[k] = float(v)
+                else:
+                    fold_dict[k] = v
             fold_dict['fold'] = i
             detailed_results[loss_name].append(fold_dict)
 
     with open(os.path.join(version_dir, 'kfold_details.json'), 'w', encoding='utf-8') as f:
         json.dump(detailed_results, f, ensure_ascii=False, indent=2)
 
+    # 绘制混淆矩阵
+    print(f"\n{'='*80}")
+    print("生成混淆矩阵可视化...")
+    print(f"{'='*80}")
+
+    # 为每个 loss 汇总所有 fold 的预测结果
+    combined_results = {}
+    for loss_name, fold_results in all_results.items():
+        all_preds = []
+        all_labels = []
+        for fold in fold_results:
+            if 'preds' in fold and 'labels' in fold:
+                all_preds.extend(fold['preds'])
+                all_labels.extend(fold['labels'])
+        if all_preds:
+            combined_results[loss_name] = {
+                'preds': np.array(all_preds),
+                'labels': np.array(all_labels)
+            }
+
+    # 保存汇总混淆矩阵
+    if combined_results:
+        cm_save_dir = os.path.join(version_dir, "confusion_matrices")
+        plot_confusion_matrices(combined_results, le, cm_save_dir)
+        print(f"混淆矩阵已保存至: {cm_save_dir}")
+
     print(f"\n所有结果已保存至: {version_dir}")
     logger.close()
+
+    # 恢复标准输出（关闭日志重定向后再生成图表）
+    sys.stdout = sys.__stdout__
+
+    # 自动绘制条形图
+    print(f"\n{'='*80}")
+    print("生成五折交叉验证条形图...")
+    print(f"{'='*80}")
+
+    # 添加 scripts 目录到 Python 路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    from plot_kfold_barchart import plot_kfold_barchart, plot_combined_comparison
+
+    summary_path = os.path.join(version_dir, 'kfold_summary.json')
+    plot_kfold_barchart(summary, os.path.join(version_dir, "kfold_barchart_detailed.png"))
+    plot_combined_comparison(summary, os.path.join(version_dir, "kfold_barchart_combined.png"))
+
+    print(f"条形图已保存至: {version_dir}")
+    print(f"  - kfold_barchart_detailed.png (6指标详细图)")
+    print(f"  - kfold_barchart_combined.png (4指标综合图)")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":

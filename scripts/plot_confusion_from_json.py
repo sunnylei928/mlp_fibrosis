@@ -179,7 +179,7 @@ def plot_single_confusion_matrix(all_predictions, loss_name, save_path, n_classe
 def main():
     parser = argparse.ArgumentParser(description='从JSON文件绘制混淆矩阵')
     parser.add_argument('--json', type=str,
-                        default='/home/ubuntu/lq/MLP_results/5fold_3/repeated_kfold_predictions.json',
+                        default='/home/ubuntu/lq/MLP_results/5fold_3/json/repeated_kfold_predictions.json',
                         help='JSON文件路径')
     parser.add_argument('--output', type=str,
                         default='confusion_matrices.png',

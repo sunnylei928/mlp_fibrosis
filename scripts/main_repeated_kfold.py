@@ -166,6 +166,8 @@ def run_single_repeat(config, loss_configs, X, y, le, repeat_idx, seed, save_dir
             elif loss_type == 'cdw_ce_margin':
                 loss_kwargs["alpha"] = 1.0
                 loss_kwargs["margin"] = 0.05
+            elif loss_type == 'cdw_ce_cc':
+                loss_kwargs["alpha"] = 0.75  # 临床成本矩阵距离惩罚（v4: 提高alpha增强惩罚强度）
 
             criterion = get_loss(loss_type, class_weights=weight, **loss_kwargs)
             optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
@@ -207,14 +209,19 @@ def run_single_repeat(config, loss_configs, X, y, le, repeat_idx, seed, save_dir
 
             print(f"  Acc: {test_metrics['accuracy']:.4f}, QWK: {test_metrics['qwk']:.4f}, MAE: {test_metrics['mae']:.4f}")
 
-            # 保存结果
+            # 计算混淆矩阵
+            from sklearn.metrics import confusion_matrix
+            cm = confusion_matrix(np.array(all_labels), np.array(all_preds))
+
+            # 保存结果（包含混淆矩阵）
             fold_results[fold_idx][loss_name] = {
                 'accuracy': test_metrics['accuracy'],
                 'adjacent_accuracy': test_metrics['adjacent_accuracy'],
                 'macro_f1': test_metrics['macro_f1'],
                 'weighted_f1': test_metrics['weighted_f1'],
                 'qwk': test_metrics['qwk'],
-                'mae': test_metrics['mae']
+                'mae': test_metrics['mae'],
+                'confusion_matrix': cm.tolist()  # 添加混淆矩阵数据
             }
 
             # 保存预测结果
@@ -226,26 +233,27 @@ def run_single_repeat(config, loss_configs, X, y, le, repeat_idx, seed, save_dir
     return fold_results, fold_predictions
 
 
-def run_repeated_kfold_cv(config, loss_configs, n_repeats=3, seeds=None):
+def run_repeated_kfold_cv(config, loss_configs, X, y, le, n_repeats=3, seeds=None, save_dir=None):
     """
     运行多次五折交叉验证
 
     Args:
         config: 配置对象
         loss_configs: loss配置
+        X, y, le: 数据和标签编码器
         n_repeats: 重复次数
         seeds: 随机种子列表
+        save_dir: 保存目录（由main函数传入，避免重复创建）
 
     Returns:
         all_results: {repeat_idx: {fold_idx: {loss_name: metrics}}}
         all_predictions: {repeat_idx: {fold_idx: {loss_name: {"y_true": ..., "y_pred": ...}}}}
         summary: 汇总统计
+        save_dir: 保存目录
     """
     if seeds is None:
         seeds = [42, 123, 456][:n_repeats]
 
-    # 加载完整数据
-    X, y, le = load_data_full(config)
     print(f"\n总样本数: {len(X)}")
     print(f"标签分布: {np.bincount(y)}")
     print(f"标签映射: {le.classes_}")
@@ -254,9 +262,8 @@ def run_repeated_kfold_cv(config, loss_configs, n_repeats=3, seeds=None):
     all_predictions = {}
     repeat_summaries = []
 
-    # 创建保存目录
-    version_dir = create_versioned_dir(config.OUTPUT_DIR)
-    weights_dir = os.path.join(version_dir, "weights")
+    # 创建weights子目录
+    weights_dir = os.path.join(save_dir, "weights")
     os.makedirs(weights_dir, exist_ok=True)
 
     # 运行多次五折交叉验证
@@ -467,7 +474,7 @@ def plot_comparison(summary, save_dir):
 
         ax.set_ylabel(label, fontsize=12)
         ax.set_xticks(x_pos)
-        ax.set_xticklabels(loss_names, rotation=15, ha='right')
+        ax.set_xticklabels(loss_names, rotation=45, ha='right', fontsize=9)
         ax.grid(True, axis='y', linestyle='--', alpha=0.5)
 
         # 添加数值标签
@@ -526,7 +533,7 @@ def plot_boxplot(all_results, summary, save_dir):
                         capprops=dict(linewidth=1.5))
 
         # 设置x轴刻度标签旋转（与comparison图一致）
-        ax.set_xticklabels(labels_for_metric, rotation=15, ha='right')
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=9)
 
         # 添加均值点
         for i, data in enumerate(data_for_metric):
@@ -803,6 +810,7 @@ def main():
         "ce":            ("ce", None),
         "cdw_ce":        ("cdw_ce", None),
         "cdw_ce_margin": ("cdw_ce_margin", None),
+        "cdw_ce_cc":      ("cdw_ce_cc", None),  # Clinical Cost-Aware Distance (NEW)
         "mse":           ("mse", None),
         "mlp_coral":     ("mlp_coral", None),  # MLP + CORAL loss
         "coral":         ("coral", None),       # CORALNet + CORAL loss (原始)
@@ -828,9 +836,12 @@ def main():
     print(f"配置: {n_repeats}次重复 × 5折交叉验证")
     print(f"随机种子: {seeds}")
 
-    # 运行多次五折交叉验证
+    # 加载数据（只加载一次，传入run_repeated_kfold_cv）
+    X, y, le = load_data_full(config)
+
+    # 运行多次五折交叉验证（传入version_dir避免重复创建目录）
     all_results, all_predictions, summary, save_dir = run_repeated_kfold_cv(
-        config, loss_configs, n_repeats=n_repeats, seeds=seeds
+        config, loss_configs, X, y, le, n_repeats=n_repeats, seeds=seeds, save_dir=version_dir
     )
 
     # 创建子目录：json文件和图片分开存放
@@ -840,7 +851,6 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
 
     # 打印最终汇总
-    le = load_data_full(config)[2]  # 获取label encoder
     print_final_summary(summary, le)
 
     # 绘制对比图
@@ -866,6 +876,32 @@ def main():
     print(f"{'='*100}")
 
     logger.close()
+
+    # 恢复标准输出（关闭日志重定向后再生成图表）
+    sys.stdout = sys.__stdout__
+
+    # 自动绘制条形图（汇总所有repeat和fold的结果）
+    print(f"\n{'='*100}")
+    print("  生成汇总条形图...")
+    print(f"{'='*100}")
+
+    # 添加 scripts 目录到 Python 路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+
+    from plot_kfold_barchart import plot_kfold_barchart, plot_combined_comparison
+
+    # 使用 overall 部分绘制条形图（结构相同）
+    summary_path = os.path.join(json_dir, 'repeated_kfold_summary.json')
+    overall_summary = summary["overall"]  # 提取overall部分
+    plot_kfold_barchart(overall_summary, os.path.join(plots_dir, "kfold_barchart_detailed.png"))
+    plot_combined_comparison(overall_summary, os.path.join(plots_dir, "kfold_barchart_combined.png"))
+
+    print(f"  条形图已保存至: {plots_dir}")
+    print(f"    - kfold_barchart_detailed.png (6指标详细图)")
+    print(f"    - kfold_barchart_combined.png (4指标综合图)")
+    print(f"{'='*100}")
 
 
 if __name__ == "__main__":

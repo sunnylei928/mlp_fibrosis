@@ -124,6 +124,15 @@ def save_results(results_dict, save_dir):
             serializable[k] = {m: float(v[m]) if isinstance(v[m], (np.floating, np.integer)) else v[m]
                                # 这里增加了 "qwk" 和 "mae"
                                for m in ["accuracy", "adjacent_accuracy", "macro_f1", "weighted_f1", "qwk", "mae"]}
+
+            # 添加混淆矩阵数据
+            if "preds" in v and "labels" in v:
+                cm = confusion_matrix(v["labels"], v["preds"])
+                serializable[k]["confusion_matrix"] = cm.tolist()
+                # 添加预测结果（用于后续分析）
+                serializable[k]["preds"] = v["preds"].tolist()
+                serializable[k]["labels"] = v["labels"].tolist()
+
         json.dump(serializable, f, ensure_ascii=False, indent=2)
 
 
@@ -140,13 +149,13 @@ def plot_comparison(results_dict, histories, save_dir):
         names = list(results_dict.keys())
         values = [results_dict[n][metric] for n in names]
         bars = ax.bar(names, values, color='steelblue')
-        
+
         # 特别处理：MAE 是误差，不能把上限锁死在 1.05，其他指标是 0~1 的分数
         if metric != "mae":
             ax.set_ylim(0, 1.05)
         else:
             ax.set_ylim(bottom=0) # MAE 的顶部自适应
-            
+
         ax.set_title(title)
         ax.set_ylabel("Score" if metric != "mae" else "Error")
         for bar, val in zip(bars, values):
@@ -154,7 +163,9 @@ def plot_comparison(results_dict, histories, save_dir):
             offset = 0.01 if metric != "mae" else (max(values)*0.02)
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + offset,
                     f"{val:.3f}", ha='center', va='bottom', fontsize=9)
-        ax.tick_params(axis='x', rotation=15)
+
+        # 改善 x 轴标签显示
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=9)
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "metrics_comparison.png"), dpi=150)
