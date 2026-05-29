@@ -48,15 +48,28 @@ python scripts/inference.py --weight outputs/weights/best_coral_r0_f0.pt --data 
 ### Loss Functions (`core/loss.py`)
 
 Factory pattern via `get_loss(name, **kwargs)`:
+
+**Currently active in training:**
 - `ce`: Standard cross-entropy
 - `cdw_ce`: Class Distance Weighted CE (Polat et al., 2025)
+- `mse`: MSE on softmax probabilities
+- `cdw_ada`: Adaptive clinical cost-aware CE with asymmetric weights (下三角0.75，上三角0.5, alpha=1.2)
+- `cdw_exp`: Exponential distance CE (下三角base=1.3，上三角base=1.2)
+
+**Other available losses (not currently in training):**
 - `cdw_ce_margin`: CDW-CE with margin
-- `cdw_ce_prob`: CDW-CE with prediction confidence weighting - multiplies entire loss by max predicted probability $p_{\hat{y}}$
+- `cdw_ce_prob`: CDW-CE with prediction confidence weighting
+- `cdw_ce_cc`: Manual clinical cost matrix (older version)
 - `coral`: CORAL ordinal loss (Saito et al., 2021) - used with CORALNet
 - `mlp_coral`: Same CORAL loss - used with MLP (for ablation study)
-- `mse`: MSE on softmax probabilities
 - `focal`: Focal loss (gamma=2.0)
 - `label_smoothing`: Label smoothing CE (smoothing=0.1)
+
+**⚠️ Failed experiments (DO NOT USE):**
+- `cdw_exp_w`: Exponential + class weights (caused Accuracy collapse 51%→16%)
+- `cdw_be`: Boundary enhancement (caused Accuracy collapse 51%→25%)
+
+> See `docs/loss_functions_comparison.md` for detailed mathematical formulas, experiment results, and failure analysis.
 
 **Loss Function Formulas**:
 
@@ -66,14 +79,43 @@ Factory pattern via `get_loss(name, **kwargs)`:
 | CDW-CE | $-\sum_{i} \log(1-p_i) \cdot \|i-c\|^\alpha$ |
 | CDW-CE-Margin | Same, with $p_i' = \min(p_i + m, 1-\epsilon)$ |
 | CDW-CE-Prob | $p_{\hat{y}} \cdot \left(-\sum_{i} \log(1-p_i) \cdot \|i-c\|^\alpha\right)$ |
+| CDW-ADA | $-\sum_{i} \log(1-p_i) \cdot Cost[c,i]$ where $Cost[c,i] = \|c-i\|^{1.2} \times w$ (下三角w=0.75，上三角w=0.5) |
+| CDW-EXP | $-\sum_{i} \log(1-p_i) \cdot Cost[c,i]$ where $Cost[c,i] = b^{\|c-i\|}$ (下三角b=1.3，上三角b=1.2) |
 | CORAL | BCE over $K-1$ binary tasks (cumulative probabilities) |
 
 where $p_i = \text{softmax}(\text{logits})_i$, $c$ is true class, $\hat{y} = \arg\max_i p_i$ is predicted class.
+
+**Cost Matrices**:
+
+**CDW-ADA** (lower=0.75 for 病情低估, upper=0.5 for 病情高估, alpha=1.2):
+```
+     | F0   | F1   | F2   | F3   | F4   |
+-----|------|------|------|------|------|
+ F0  | 0.00 | 0.50 | 1.15 | 1.90 | 2.76 | (高估: d^1.2 × 0.5)
+ F1  | 0.75 | 0.00 | 0.50 | 1.15 | 1.90 |
+ F2  | 1.72 | 0.75 | 0.00 | 0.50 | 1.15 |
+ F3  | 2.81 | 1.72 | 0.75 | 0.00 | 0.50 |
+ F4  | 4.00 | 2.81 | 1.72 | 0.75 | 0.00 | (低估: d^1.2 × 0.75)
+```
+
+**CDW-EXP** (lower_base=1.3 for 病情低估, upper_base=1.2 for 病情高估):
+```
+     | F0   | F1   | F2   | F3   | F4   |
+-----|------|------|------|------|------|
+ F0  | 0.00 | 1.20 | 1.44 | 1.73 | 2.07 | (高估: 1.2^d)
+ F1  | 1.30 | 0.00 | 1.20 | 1.44 | 1.73 |
+ F2  | 1.69 | 1.30 | 0.00 | 1.20 | 1.44 |
+ F3  | 2.20 | 1.69 | 1.30 | 0.00 | 1.20 |
+ F4  | 2.86 | 2.20 | 1.69 | 1.30 | 0.00 | (低估: 1.3^d)
+```
 
 **Adding a new loss function**:
 1. Implement class in `core/loss.py` with `forward(logits, targets)` method
 2. Add entry to `get_loss()` factory
 3. For ordinal losses, implement `predict(logits)` method
+4. Add to `loss_configs` in all three training scripts (main.py, main_kfold.py, main_repeated_kfold.py)
+5. Add parameter settings in the loss_kwargs section (if needed)
+6. Training scripts automatically log model parameters via `log_model_params()`
 
 ## Data Pipeline
 
@@ -149,7 +191,7 @@ To compare a new loss function:
 ```python
 class NewLoss(nn.Module):
     def forward(self, logits, targets):
-        # logits shape depends on architecture
+        # logits: [B, 5] for standard classification
         pass
 ```
 
@@ -159,15 +201,18 @@ elif name == 'new_loss':
     return NewLoss(**kwargs)
 ```
 
-3. Add to experiment lists in `scripts/main.py`, `scripts/main_kfold.py`, `scripts/main_repeated_kfold.py`
+3. Add to all three training scripts:
+   - `scripts/main.py` (line ~125): Add to `loss_configs` dict
+   - `scripts/main_kfold.py` (line ~278): Add to `loss_configs` dict + `loss_kwargs`
+   - `scripts/main_repeated_kfold.py` (line ~845): Add to `loss_configs` dict + `loss_kwargs`
 
-4. **Choose architecture in training scripts**:
+4. Use MLPClassifier for all new losses:
 ```python
-if loss_type == 'new_loss':
-    # Option A: Use MLP
-    model = MLPClassifier(..., ordinal_head=False/True)
-    # Option B: Create custom architecture (like CORALNet)
+model = MLPClassifier(input_dim, config.HIDDEN_DIMS, num_classes,
+                      config.DROPOUT, ordinal_head=False)
 ```
+
+5. Parameter logging is automatic via `log_model_params()` in all scripts
 
 ## Data Structure
 
@@ -178,3 +223,84 @@ if loss_type == 'new_loss':
 - **Final input dimension: 24 features** (20 numeric + 4 binary)
 - Target: LABLE_F (F0-F4)
 - Class distribution: F0:57, F1:89, F2:59, F3:33, F4:32 (imbalanced)
+
+---
+
+## Current Training Configuration (2026-05-29)
+
+**Active loss functions** (5 total):
+1. `ce` - Standard cross-entropy (baseline)
+2. `cdw_ce` - Distance weighted CE (α=1.0)
+3. `mse` - Mean squared error
+4. `cdw_ada` - Adaptive clinical cost-aware CE (下三角0.75，上三角0.5, alpha=1.2)
+5. `cdw_exp` - **Exponential distance CE** (下三角base=1.3，上三角base=1.2) - **当前最佳**
+
+**Training parameters**:
+- Architecture: MLPClassifier (ordinal_head=False)
+- Hidden dims: [64, 32, 16]
+- Dropout: 0.3
+- Learning rate: 1e-3
+- Batch size: 32
+- Epochs: 200 (with early stopping on val MAE, patience=30)
+- Optimizer: AdamW (weight_decay default)
+- Class weights: **sqrt-smoothed** (`1.0 / sqrt(class_counts)`, normalized to [1, max])
+
+**Validation**:
+- Single run: `python scripts/main.py`
+- 5-fold CV: `python scripts/main_kfold.py`
+- Repeated 5-fold CV: `python scripts/main_repeated_kfold.py` (recommended)
+
+**Performance summary** (from repeated 5-fold CV):
+- `cdw_exp`: Accuracy 55.19%, QWK 0.715, MAE 0.596 (最佳整体性能)
+- `cdw_ada`: Accuracy ~53%, QWK ~0.68, MAE ~0.65 (稳定性能)
+- `ce`: Accuracy ~51%, QWK ~0.67, MAE ~0.65 (基线)
+
+**Key design choices**:
+
+1. **cdw_ada** (alpha-非线性版本):
+   - Cost[c,i] = |c-i|^1.2 × w (下三角w=0.75，上三角w=0.5)
+   - Alpha参数控制距离敏感度（>1 加剧远距离惩罚）
+
+2. **cdw_exp** (指数版本，当前最优):
+   - Cost[c,i] = b^|c-i| (下三角b=1.3，上三角b=1.2)
+   - 指数增长代价，对远距离误判惩罚更强
+
+3. **Class weights** (sqrt-smoothed):
+   - 避免原始权重（1/n_c）过于激进
+   - 使用 sqrt 平滑：1/sqrt(n_c)，归一化到 [1, max]
+
+---
+
+## ⚠️ Warnings and Failed Experiments
+
+### DO NOT Combine Class Weights with CDW-CE Losses
+
+**Failed experiment**: `cdw_exp_w` (exponential + class weights)
+- **Result**: Accuracy collapsed from 51% → 16%, QWK from 0.67 → 0.04
+- **Root cause**: Dual weighting (distance weights × category weights) created severe imbalance
+- **Lesson**: CDW-CE type losses already encode class priorities through distance cost matrices. Adding class weights on top creates over-weighting that destroys performance.
+
+### DO NOT Apply Local Boundary Enhancement
+
+**Failed experiment**: `cdw_be` (boundary enhancement on F2→F1)
+- **Result**: Accuracy collapsed from 51% → 25%, F2 recall = 0%
+- **Root cause**: 2.0× local enhancement on F2→F1 boundary destroyed global cost matrix balance
+- **Lesson**: CDW-CE cost matrices are globally designed. Local enhancement on specific edges creates imbalance that causes the model to overcompensate elsewhere.
+
+### Parameter Sensitivity
+
+CDW-CE type losses are highly sensitive to parameter changes:
+- Small adjustments (0.75→0.80, 0.5→0.48) may have minimal impact
+- Original parameters (cdw_ada: lower=0.75, upper=0.5, alpha=1.2; cdw_exp: lower=1.3, upper=1.2) are well-tuned
+- If adjusting parameters, use very small increments and validate thoroughly
+
+### F2→F1 Misclassification Problem
+
+Current models still show significant F2→F1 misclassification (~50% of F2 samples).
+**Better approaches** (not yet tried):
+- Data level: Augment F2 samples, collect more F2 data
+- Feature engineering: Extract features that better distinguish F1/F2
+- Model architecture: Attention mechanisms, ensemble methods
+- Post-processing: Rule-based prediction calibration
+
+---
