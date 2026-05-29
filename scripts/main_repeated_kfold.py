@@ -51,6 +51,26 @@ class Logger:
         self.log.close()
 
 
+def log_model_params(config, loss_type, loss_kwargs, model_params, criterion=None):
+    """记录模型和训练参数"""
+    print(f"\n{'─' * 50}")
+    print(f"  模型参数配置")
+    print(f"{'─' * 50}")
+    print(f"  Loss 类型: {loss_type}")
+    print(f"  模型架构: {model_params.get('arch', 'MLP')}")
+    print(f"  Hidden dims: {config.HIDDEN_DIMS}")
+    print(f"  Dropout: {config.DROPOUT}")
+    print(f"  Learning rate: {config.LEARNING_RATE}")
+    print(f"  Weight decay: {config.WEIGHT_DECAY}")
+    print(f"  Batch size: {config.BATCH_SIZE}")
+    print(f"  Random seed: {config.RANDOM_SEED}")
+    print(f"  Loss 参数:")
+    for key, value in loss_kwargs.items():
+        if key not in ['device', 'num_classes']:
+            print(f"    {key}: {value}")
+    print(f"{'─' * 50}")
+
+
 def load_data_full(config):
     """加载完整数据集"""
     df = pd.read_excel(config.DATA_PATH)
@@ -133,10 +153,12 @@ def run_single_repeat(config, loss_configs, X, y, le, repeat_idx, seed, save_dir
         input_dim = X_train.shape[1]
         num_classes = len(le.classes_)
 
-        # 计算类别权重
+        # 计算类别权重（sqrt 平滑版本，sklearn 风格）
         class_counts = np.bincount(y_train)
-        class_weights = torch.FloatTensor(1.0 / (class_counts + 1e-6))
-        class_weights = class_weights / class_weights.sum() * len(class_counts)
+        # 使用 sqrt 平滑：weight = 1/sqrt(count)，避免权重过大
+        class_weights = torch.FloatTensor(1.0 / np.sqrt(class_counts + 1e-6))
+        # 归一化到 [1, max]，保证最小权重为1
+        class_weights = class_weights / class_weights.min()
         class_weights = class_weights.to(config.DEVICE)
 
         fold_results[fold_idx] = {}
@@ -163,13 +185,24 @@ def run_single_repeat(config, loss_configs, X, y, le, repeat_idx, seed, save_dir
             loss_kwargs = {"num_classes": num_classes, "device": config.DEVICE}
             if loss_type == 'cdw_ce':
                 loss_kwargs["alpha"] = 1.0
-            elif loss_type == 'cdw_ce_margin':
-                loss_kwargs["alpha"] = 1.0
-                loss_kwargs["margin"] = 0.05
-            elif loss_type == 'cdw_ce_cc':
-                loss_kwargs["alpha"] = 0.75  # 临床成本矩阵距离惩罚（v4: 提高alpha增强惩罚强度）
+            elif loss_type == 'cdw_ada':
+                loss_kwargs["lower_param"] = 0.75  # 下三角权重
+                loss_kwargs["upper_param"] = 0.5   # 上三角权重
+                loss_kwargs["alpha"] = 1.2         # 距离敏感度（>1加剧远距离惩罚）
+            elif loss_type == 'cdw_exp':
+                loss_kwargs["lower_param"] = 1.3   # 下三角基数（低估惩罚）
+                loss_kwargs["upper_param"] = 1.2   # 上三角基数（高估惩罚）
 
             criterion = get_loss(loss_type, class_weights=weight, **loss_kwargs)
+
+            # 记录参数
+            model_params = {
+                'arch': 'CORALNet' if loss_type == 'coral' else 'MLP',
+                'input_dim': input_dim,
+                'num_classes': num_classes
+            }
+            log_model_params(config, loss_type, loss_kwargs, model_params, criterion)
+
             optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
             # 训练
@@ -288,7 +321,7 @@ def run_repeated_kfold_cv(config, loss_configs, X, y, le, n_repeats=3, seeds=Non
     # 计算多层次汇总
     summary = compute_hierarchical_summary(all_results, n_repeats, le)
 
-    return all_results, all_predictions, summary, version_dir
+    return all_results, all_predictions, summary, save_dir
 
 
 def compute_repeat_summary(fold_results):
@@ -809,11 +842,9 @@ def main():
     loss_configs = {
         "ce":            ("ce", None),
         "cdw_ce":        ("cdw_ce", None),
-        "cdw_ce_margin": ("cdw_ce_margin", None),
-        "cdw_ce_cc":      ("cdw_ce_cc", None),  # Clinical Cost-Aware Distance (NEW)
         "mse":           ("mse", None),
-        "mlp_coral":     ("mlp_coral", None),  # MLP + CORAL loss
-        "coral":         ("coral", None),       # CORALNet + CORAL loss (原始)
+        "cdw_ada":       ("cdw_ada", None),  # 权重版本：下0.75，上0.5
+        "cdw_exp":       ("cdw_exp", None),  # 指数版本：下1.3，上1.2
     }
 
     # 实验参数

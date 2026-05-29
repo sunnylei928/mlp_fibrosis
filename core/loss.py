@@ -152,6 +152,110 @@ class CDWCEMultiBoundaryLoss(nn.Module):
         return loss_per_sample
 
 
+def generate_adaptive_cost_matrix(num_classes, lower_weight=0.75, upper_weight=0.5, alpha=1.0):
+    """
+    基于CDW_CE距离矩阵生成非对称自适应成本矩阵（权重版本 + alpha）
+
+    设计理念：
+        - 基于基础距离 |i-j|
+        - 下三角（病情低估）：(距离 ^ alpha) × lower_weight
+        - 上三角（病情高估）：(距离 ^ alpha) × upper_weight
+        - 对角线：0（正确预测）
+
+    Args:
+        num_classes: 类别数量
+        lower_weight: 下三角权重（低估惩罚，默认0.75）
+        upper_weight: 上三角权重（高估惩罚，默认0.5）
+        alpha: 距离幂次（默认1.0，>1加剧远距离惩罚，<1减缓）
+
+    Returns:
+        cost_matrix: [num_classes, num_classes] tensor
+    """
+    cost_matrix = torch.zeros(num_classes, num_classes)
+    for i in range(num_classes):
+        for j in range(num_classes):
+            if i == j:
+                cost_matrix[i, j] = 0.0
+            elif i < j:
+                # 上三角：病情高估，惩罚较小
+                distance = j - i
+                cost_matrix[i, j] = (distance ** alpha) * upper_weight
+            else:
+                # 下三角：病情低估，惩罚较大
+                distance = i - j
+                cost_matrix[i, j] = (distance ** alpha) * lower_weight
+    return cost_matrix
+
+
+def generate_exponential_cost_matrix(num_classes, lower_base=1.3, upper_base=1.2):
+    """
+    基于指数距离生成非对称自适应成本矩阵（指数版本）
+
+    设计理念：
+        - 下三角（病情低估）：lower_base ^ distance
+        - 上三角（病情高估）：upper_base ^ distance
+        - 对角线：0（正确预测）
+        - base > 1，距离越大，代价呈指数增长
+
+    Args:
+        num_classes: 类别数量
+        lower_base: 下三角基数（低估惩罚，默认1.3，建议1.2-1.5）
+        upper_base: 上三角基数（高估惩罚，默认1.2，建议1.1-1.4）
+        注意：lower_base > upper_base，保证低估惩罚更大
+
+    Returns:
+        cost_matrix: [num_classes, num_classes] tensor
+    """
+    cost_matrix = torch.zeros(num_classes, num_classes)
+    for i in range(num_classes):
+        for j in range(num_classes):
+            if i == j:
+                cost_matrix[i, j] = 0.0
+            elif i < j:
+                # 上三角：病情高估，惩罚较小
+                distance = j - i
+                cost_matrix[i, j] = upper_base ** distance
+            else:
+                # 下三角：病情低估，惩罚较大
+                distance = i - j
+                cost_matrix[i, j] = lower_base ** distance
+    return cost_matrix
+
+
+def generate_alpha_cost_matrix(num_classes, lower_alpha=1.0, upper_alpha=0.7):
+    """
+    基于CDW_CE距离矩阵生成非对称自适应成本矩阵（α版本）
+
+    设计理念：
+        - 基于基础距离 |i-j|
+        - 下三角（病情低估）：距离 ^ lower_alpha
+        - 上三角（病情高估）：距离 ^ upper_alpha
+        - 对角线：0（正确预测）
+
+    Args:
+        num_classes: 类别数量
+        lower_alpha: 下三角α（低估惩罚，默认1.0，建议0.9-1.1）
+        upper_alpha: 上三角α（高估惩罚，默认0.7，建议0.6-0.8）
+
+    Returns:
+        cost_matrix: [num_classes, num_classes] tensor
+    """
+    cost_matrix = torch.zeros(num_classes, num_classes)
+    for i in range(num_classes):
+        for j in range(num_classes):
+            if i == j:
+                cost_matrix[i, j] = 0.0
+            elif i < j:
+                # 上三角：病情高估，惩罚较小
+                distance = j - i
+                cost_matrix[i, j] = distance ** upper_alpha
+            else:
+                # 下三角：病情低估，惩罚较大
+                distance = i - j
+                cost_matrix[i, j] = distance ** lower_alpha
+    return cost_matrix
+
+
 class CDWCEClinicalCostLoss(nn.Module):
     """
     Class Distance Weighted Cross-Entropy Loss with Clinical Cost-Aware Distance.
@@ -171,38 +275,60 @@ class CDWCEClinicalCostLoss(nn.Module):
     公式：
         CDW-CE-CC = -sum_{i=0}^{C-1} log(1 - p_i) * Cost[c, i]^alpha
 
-    其中 Cost[c, i] 是临床风险矩阵（v2: 范围0-4，更平衡）：
-        - 对角线：0（正确预测）
-        - 上三角（病情高估）：低代价（0.3-3.0）
-        - 下三角（病情低估）：高代价（0.5-4.0）
-        - F4漏诊：最高代价（4.0）
-        - 相邻类别间惩罚较低（0.3-1.0）
-
     Args:
         alpha: 距离惩罚的幂指数（默认1.0）
         cost_matrix: 临床成本矩阵 [5, 5]，如为None则使用默认矩阵
+        adaptive: 是否使用自适应生成矩阵（权重版本）
+        alpha_mode: 是否使用α模式（不同α）
+        lower_weight/alpha: 下三角参数（默认0.75或1.0）
+        upper_weight/alpha: 上三角参数（默认0.5或0.7）
         reduction: 'mean', 'sum', 或 'none'
         eps: 数值稳定性常数
     """
-    def __init__(self, alpha=1.0, cost_matrix=None, reduction='mean', eps=1e-7):
+    def __init__(self, alpha=1.0, cost_matrix=None, adaptive=False, alpha_mode=False,
+                 lower_param=0.75, upper_param=0.5,
+                 reduction='mean', eps=1e-7):
         super().__init__()
         self.alpha = alpha
         self.reduction = reduction
         self.eps = eps
+        self.alpha_mode = alpha_mode
 
-        # 默认临床成本矩阵（行=真实，列=预测）
-        # 原则：漏诊(下三角) > 过诊(上三角)，F4漏诊惩罚最大
-        # v2: 降低惩罚范围（0-4），让模型不那么保守
-        if cost_matrix is None:
-            #      F0   F1   F2   F3   F4
-            cost_matrix = torch.tensor([
-                [0.0, 0.3, 0.8, 1.5, 3.0],  # 真实F0: 过诊F4代价3
-                [0.5, 0.0, 0.3, 1.0, 2.5],  # 真实F1: 漏诊F4代价2.5
-                [1.0, 0.5, 0.0, 0.3, 1.5],  # 真实F2: 漏诊F4代价1.5
-                [2.0, 1.2, 0.5, 0.0, 0.8],  # 真实F3: 漏诊F4代价0.8
-                [4.0, 3.0, 2.0, 1.0, 0.0]   # 真实F4: 过诊F0代价4，漏诊F3代价1.0
-            ])
-        self.register_buffer('cost_matrix', cost_matrix)
+        # 根据模式选择成本矩阵
+        if alpha_mode:
+            # α模式：基于距离幂次的自适应矩阵
+            self.cost_matrix = generate_alpha_cost_matrix(
+                num_classes=5,
+                lower_alpha=lower_param,  # 下三角α
+                upper_alpha=upper_param   # 上三角α
+            )
+            # α模式下不再对矩阵做幂次，直接使用
+            self.alpha = 1.0
+        elif adaptive:
+            # 权重模式：基于距离权重的自适应矩阵 + alpha
+            self.cost_matrix = generate_adaptive_cost_matrix(
+                num_classes=5,
+                lower_weight=lower_param,
+                upper_weight=upper_param,
+                alpha=alpha  # 传入 alpha 参数
+            )
+            # adaptive 模式下不再对矩阵做幂次，直接使用
+            self.alpha = 1.0
+        else:
+            # 手动定义的默认矩阵（行=真实，列=预测）
+            # 原则：漏诊(下三角) > 过诊(上三角)，F4漏诊惩罚最大
+            if cost_matrix is None:
+                #      F0   F1   F2   F3   F4
+                cost_matrix = torch.tensor([
+                    [0.0, 0.3, 0.8, 1.5, 3.0],  # 真实F0: 过诊F4代价3
+                    [0.5, 0.0, 0.3, 1.0, 2.5],  # 真实F1: 漏诊F4代价2.5
+                    [1.0, 0.5, 0.0, 0.3, 1.5],  # 真实F2: 漏诊F4代价1.5
+                    [2.0, 1.2, 0.5, 0.0, 0.8],  # 真实F3: 漏诊F4代价0.8
+                    [4.0, 3.0, 2.0, 1.0, 0.0]   # 真实F4: 过诊F0代价4，漏诊F3代价1.0
+                ])
+            self.cost_matrix = cost_matrix
+
+        self.register_buffer('cost_matrix_buffer', self.cost_matrix)
 
     def forward(self, logits, targets):
         probs = F.softmax(logits, dim=-1)           # [B, C]
@@ -218,7 +344,7 @@ class CDWCEClinicalCostLoss(nn.Module):
         weights = torch.zeros(batch_size, num_classes, device=device)
         for b in range(batch_size):
             true_class = targets[b].item()
-            weights[b] = self.cost_matrix[true_class] ** self.alpha
+            weights[b] = self.cost_matrix_buffer[true_class] ** self.alpha
 
         loss_matrix = -torch.log(1.0 - probs + self.eps) * weights
         loss_per_sample = loss_matrix.sum(dim=-1)   # [B]
@@ -228,6 +354,64 @@ class CDWCEClinicalCostLoss(nn.Module):
         elif self.reduction == 'sum':
             return loss_per_sample.sum()
         return loss_per_sample
+
+
+class CDWCEExponentialCostLoss(nn.Module):
+    """
+    Class Distance Weighted Cross-Entropy Loss with Exponential Cost-Aware Distance.
+
+    创新点：指数成本感知距离（Exponential Cost-Aware Distance）
+
+    核心思想：
+        - 使用 base ^ distance 代替 distance * weight
+        - base > 1：距离越大，代价呈指数增长
+        - 下三角基数 > 上三角基数，保证低估惩罚更大
+
+    公式：
+        CDW-CE-EXP = -sum_{i=0}^{C-1} log(1 - p_i) * ExpCost[c, i]
+
+    Args:
+        lower_base: 下三角基数（低估惩罚，默认1.3）
+        upper_base: 上三角基数（高估惩罚，默认1.2）
+        reduction: 'mean', 'sum', 或 'none'
+        eps: 数值稳定性常数
+    """
+    def __init__(self, lower_base=1.3, upper_base=1.2,
+                 reduction='mean', eps=1e-7):
+        super().__init__()
+        self.reduction = reduction
+        self.eps = eps
+
+        # 生成指数成本矩阵
+        self.cost_matrix = generate_exponential_cost_matrix(
+            num_classes=5,
+            lower_base=lower_base,
+            upper_base=upper_base
+        )
+        self.register_buffer('cost_matrix_buffer', self.cost_matrix)
+
+    def forward(self, logits, targets):
+        probs = F.softmax(logits, dim=-1)           # [B, C]
+        num_classes = logits.size(-1)
+        batch_size = logits.size(0)
+        device = logits.device
+
+        # 对每个样本，根据其真实类别获取对应的成本行
+        weights = torch.zeros(batch_size, num_classes, device=device)
+        for b in range(batch_size):
+            true_class = targets[b].item()
+            weights[b] = self.cost_matrix_buffer[true_class]
+
+        loss_matrix = -torch.log(1.0 - probs + self.eps) * weights
+        loss_per_sample = loss_matrix.sum(dim=-1)   # [B]
+
+        if self.reduction == 'mean':
+            return loss_per_sample.mean()
+        elif self.reduction == 'sum':
+            return loss_per_sample.sum()
+        return loss_per_sample
+
+
 
 
 class CORALNetLoss(nn.Module):
@@ -389,7 +573,9 @@ class OrdinalCrossEntropy(nn.Module):
 
 
 def get_loss(name, class_weights=None, num_classes=5, device='cpu',
-             alpha=1.0, margin=0.05, cost_matrix=None):
+             alpha=1.0, margin=0.05, cost_matrix=None,
+             adaptive=False, alpha_mode=False,
+             lower_param=0.75, upper_param=0.5):
     """
     Factory for loss functions.
 
@@ -398,7 +584,10 @@ def get_loss(name, class_weights=None, num_classes=5, device='cpu',
         'cdw_ce'              – CDW-CE (alpha controls distance-penalty strength)
         'cdw_ce_margin'       – CDW-CE with additive margin
         'cdw_ce_prob'         – CDW-CE with prediction confidence weighting
-        'cdw_ce_cc'           – CDW-CE with Clinical Cost-Aware Distance (NEW)
+        'cdw_ce_cc'           – CDW-CE with Clinical Cost-Aware Distance
+        'cdw_ada'             – CDW-CE-CC with adaptive weights (NEW, 短名)
+        'cdw_alp'             – CDW-CE-CC with different alphas (NEW, 短名)
+        'cdw_exp'             – CDW-CE-CC with exponential distance (NEW, 指数版本)
         'coral'               – CORALNet ordinal loss (expects logits [B, K-1])
         'mlp_coral'           – Same as 'coral', but used with MLP architecture
         'mse'                 – MSE on softmax probabilities vs one-hot targets
@@ -421,6 +610,19 @@ def get_loss(name, class_weights=None, num_classes=5, device='cpu',
         return CDWCEProbLoss(alpha=alpha, margin=margin)
     elif name == 'cdw_ce_cc':
         return CDWCEClinicalCostLoss(alpha=alpha, cost_matrix=cost_matrix)
+    elif name == 'cdw_ada':
+        # 权重版本：下三角0.75，上三角0.5 + alpha控制距离敏感度
+        return CDWCEClinicalCostLoss(alpha=alpha, adaptive=True, alpha_mode=False,
+                                     lower_param=lower_param, upper_param=upper_param)
+    elif name == 'cdw_alp':
+        # α版本：下三角1.0，上三角0.7
+        return CDWCEClinicalCostLoss(alpha_mode=True,
+                                     lower_param=lower_param, upper_param=upper_param)
+    elif name == 'cdw_exp':
+        # 指数版本：下三角1.3，上三角1.2（默认值）
+        lower_base = lower_param  # 复用参数名
+        upper_base = upper_param
+        return CDWCEExponentialCostLoss(lower_base=lower_base, upper_base=upper_base)
     elif name == 'coral' or name == 'mlp_coral':
         return CORALNetLoss(num_classes=num_classes)
     elif name == 'mse':

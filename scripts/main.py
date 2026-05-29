@@ -31,6 +31,26 @@ class Logger:
         self.log.close()
 
 
+def log_model_params(config, loss_type, loss_kwargs, model_params, criterion=None):
+    """记录模型和训练参数"""
+    print(f"\n{'─' * 50}")
+    print(f"  模型参数配置")
+    print(f"{'─' * 50}")
+    print(f"  Loss 类型: {loss_type}")
+    print(f"  模型架构: {model_params.get('arch', 'MLP')}")
+    print(f"  Hidden dims: {config.HIDDEN_DIMS}")
+    print(f"  Dropout: {config.DROPOUT}")
+    print(f"  Learning rate: {config.LEARNING_RATE}")
+    print(f"  Weight decay: {config.WEIGHT_DECAY}")
+    print(f"  Batch size: {config.BATCH_SIZE}")
+    print(f"  Random seed: {config.RANDOM_SEED}")
+    print(f"  Loss 参数:")
+    for key, value in loss_kwargs.items():
+        if key not in ['device', 'num_classes']:
+            print(f"    {key}: {value}")
+    print(f"{'─' * 50}")
+
+
 def save_full_config(config, loss_configs, save_dir):
     """保存完整的配置信息"""
     config_dict = {}
@@ -105,12 +125,9 @@ def main():
     loss_configs = {
         "ce":              ("ce", None),
         "cdw_ce":          ("cdw_ce", None),
-        "cdw_ce_margin":   ("cdw_ce_margin", None),
-        "cdw_ce_prob":     ("cdw_ce_prob", None),
-        "cdw_ce_cc":       ("cdw_ce_cc", None),  # Clinical Cost-Aware Distance (NEW)
         "mse":             ("mse", None),
-        "mlp_coral":       ("mlp_coral", None),  # MLP + CORAL loss
-        "coral":           ("coral", None),       # CORALNet + CORAL loss (原始)
+        "cdw_ada":         ("cdw_ada", None),  # 权重版本：下0.75，上0.5
+        "cdw_exp":         ("cdw_exp", None),  # 指数版本：下1.3，上1.2
     }
 
     # 保存完整配置
@@ -141,16 +158,24 @@ def main():
         loss_kwargs = {"num_classes": num_classes, "device": config.DEVICE}
         if loss_type == 'cdw_ce':
             loss_kwargs["alpha"] = 1.0
-        elif loss_type == 'cdw_ce_margin':
-            loss_kwargs["alpha"] = 1.0
-            loss_kwargs["margin"] = 0.05
-        elif loss_type == 'cdw_ce_prob':
-            loss_kwargs["alpha"] = 1.0
-            loss_kwargs["margin"] = 0.0
-        elif loss_type == 'cdw_ce_cc':
-            loss_kwargs["alpha"] = 0.75  # 临床成本矩阵距离惩罚（v4: 提高alpha增强惩罚强度）
+        elif loss_type == 'cdw_ada':
+            loss_kwargs["lower_param"] = 0.75  # 下三角权重
+            loss_kwargs["upper_param"] = 0.5   # 上三角权重
+            loss_kwargs["alpha"] = 1.2         # 距离敏感度（>1加剧远距离惩罚）
+        elif loss_type == 'cdw_exp':
+            loss_kwargs["lower_param"] = 1.3   # 下三角基数（低估惩罚）
+            loss_kwargs["upper_param"] = 1.2   # 上三角基数（高估惩罚）
 
         criterion = get_loss(loss_type, class_weights=weight, **loss_kwargs)
+
+        # 记录参数
+        model_params = {
+            'arch': 'CORALNet' if loss_type == 'coral' else ('MLP-Ordinal' if loss_type == 'mlp_coral' else 'MLP'),
+            'input_dim': input_dim,
+            'num_classes': num_classes
+        }
+        log_model_params(config, loss_type, loss_kwargs, model_params, criterion)
+
         optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
         history = train_model(

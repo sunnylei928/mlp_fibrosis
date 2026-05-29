@@ -59,10 +59,12 @@ def load_data(config):
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
 
-    # Compute class weights for imbalanced data
+    # Compute class weights for imbalanced data (sqrt 平滑版本)
     class_counts = np.bincount(y_train)
-    class_weights = torch.FloatTensor(1.0 / (class_counts + 1e-6))
-    class_weights = class_weights / class_weights.sum() * len(class_counts)
+    # 使用 sqrt 平滑：weight = 1/sqrt(count)，避免权重过大
+    class_weights = torch.FloatTensor(1.0 / np.sqrt(class_counts + 1e-6))
+    # 归一化到 [1, max]，保证最小权重为1
+    class_weights = class_weights / class_weights.min()
     class_weights = class_weights.to(config.DEVICE)
 
     train_loader = DataLoader(FibrosisDataset(X_train, y_train),

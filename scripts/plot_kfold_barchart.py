@@ -75,30 +75,31 @@ def plot_kfold_barchart(summary_data, save_path):
         # 添加网格
         ax.grid(True, axis='y', linestyle='--', alpha=0.4)
 
-        # 只在最优的bar上显示数值标签
+        # 找到最优bar的索引
         if 'mae' not in metric:
-            # 找到最大值（最好）
             best_idx = means.index(max(means))
-            best_color = '#2ecc71'  # 绿色突出
         else:
-            # MAE找到最小值（最好）
             best_idx = means.index(min(means))
-            best_color = '#2ecc71'  # 绿色突出
 
+        # 在所有bar上显示数值，最优的用绿色突出
         for i, (bar, mean, std) in enumerate(zip(bars, means, stds)):
+            height = bar.get_height()
+            offset = 0.01 if 'mae' not in metric else (max(means) * 0.02)
+
             if i == best_idx:
-                # 最优bar：突出颜色并显示数值
-                bar.set_color(best_color)
+                # 最优bar：绿色突出并显示数值
+                bar.set_color('#2ecc71')
                 bar.set_alpha(0.9)
-                height = bar.get_height()
-                offset = 0.01 if 'mae' not in metric else (max(means) * 0.02)
                 ax.text(bar.get_x() + bar.get_width()/2, height + std + offset,
                        f'{mean:.3f}', ha='center', va='bottom',
-                       fontsize=9, fontweight='bold', color=best_color)
+                       fontsize=8, fontweight='bold', color='#2ecc71')
             else:
-                # 其他bar：只显示，不标注数值
+                # 其他bar：显示数值，使用原色但降低透明度
                 bar.set_color('steelblue')
-                bar.set_alpha(0.6)
+                bar.set_alpha(0.7)
+                ax.text(bar.get_x() + bar.get_width()/2, height + std + offset,
+                       f'{mean:.3f}', ha='center', va='bottom',
+                       fontsize=7, color='#555555')
 
     plt.suptitle('5-Fold Cross-Validation Results (Mean ± Std)',
                 fontsize=14, fontweight='bold')
@@ -159,27 +160,30 @@ def plot_combined_comparison(summary_data, save_path):
         ax.set_xticklabels(loss_names, rotation=45, ha='right', fontsize=9)
         ax.grid(True, axis='y', linestyle='--', alpha=0.4)
 
-        # 只在最优的bar上显示数值标签
+        # 找到最优bar的索引
         if 'mae' not in metric:
-            # 找到最大值（最好）
             best_idx = means.index(max(means))
         else:
-            # MAE找到最小值（最好）
             best_idx = means.index(min(means))
 
+        # 在所有bar上显示数值，最优的用绿色突出
         for i, (bar, mean, std) in enumerate(zip(bars, means, stds)):
+            height = bar.get_height()
+            offset = 0.01 if 'mae' not in metric else (max(means) * 0.02)
+
             if i == best_idx:
-                # 最优bar：突出颜色并显示数值
-                bar.set_color('#2ecc71')  # 绿色突出
+                # 最优bar：绿色突出
+                bar.set_color('#2ecc71')
                 bar.set_alpha(0.9)
-                height = bar.get_height()
-                offset = 0.01 if 'mae' not in metric else (max(means) * 0.02)
                 ax.text(bar.get_x() + bar.get_width()/2, height + std + offset,
                        f'{mean:.3f}', ha='center', va='bottom',
                        fontsize=9, fontweight='bold', color='#2ecc71')
             else:
-                # 其他bar：降低透明度
-                bar.set_alpha(0.5)
+                # 其他bar：显示数值，使用原色但降低透明度
+                bar.set_alpha(0.7)
+                ax.text(bar.get_x() + bar.get_width()/2, height + std + offset,
+                       f'{mean:.3f}', ha='center', va='bottom',
+                       fontsize=8, color='#555555')
 
     plt.suptitle('5-Fold Cross-Validation: Performance Comparison',
                 fontsize=14, fontweight='bold')
